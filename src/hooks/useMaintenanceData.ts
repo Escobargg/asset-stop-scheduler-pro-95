@@ -12,6 +12,7 @@ import {
   sapBTPCache,
   SAP_BTP_CONSTANTS
 } from '@/utils/sapBtpUtils';
+import { useMaintenanceSupabase } from './useMaintenanceSupabase';
 
 // Função otimizada para gerar grupos de ativos (reduzido para melhor performance)
 const generateAssetGroups = (): AssetGroup[] => {
@@ -209,124 +210,90 @@ const generateMaintenanceStops = (groups: AssetGroup[], strategies: MaintenanceS
 
 // Hook principal para gerenciar todos os dados de manutenção
 export const useMaintenanceData = () => {
-  // Estado dos dados com correções aplicadas
-  const [dataStore, setDataStore] = useState<DataStore>(() => {
-    const groups = generateAssetGroups();
-    const strategies = generateStrategiesForGroups(groups);
-    let stops = generateMaintenanceStops(groups, strategies);
-    
-    // Corrigir paradas órfãs e criar paradas para grupos sem paradas
-    stops = fixOrphanedStops(stops, groups);
-    const additionalStops = createStopsForGroupsWithoutStops(groups, stops);
-    stops = [...stops, ...additionalStops];
-    
-    // Associar estratégias aos grupos
-    groups.forEach(group => {
-      group.strategies = strategies.filter(strategy => strategy.groupId === group.id);
-    });
+  // Usar o hook do Supabase como fonte principal de dados
+  const supabaseData = useMaintenanceSupabase();
+
+  // Criar um dataStore virtual para compatibilidade com SAP
+  const dataStore = useMemo(() => {
+    const groups = supabaseData.getAllGroups();
+    const strategies = supabaseData.getAllStrategies();
+    const stops = supabaseData.getAllStops();
     
     return { groups, strategies, stops };
-  });
+  }, [supabaseData]);
 
-  // Getters - removed useCallback to prevent infinite loops
-  const getAllGroups = () => dataStore.groups;
-  const getAllStrategies = () => dataStore.strategies;
-  const getAllStops = () => dataStore.stops;
+  // Getters - usar funções do Supabase
+  const getAllGroups = supabaseData.getAllGroups;
+  const getAllStrategies = supabaseData.getAllStrategies;
+  const getAllStops = supabaseData.getAllStops;
+  const getGroupById = supabaseData.getGroupById;
+  const getStrategiesByGroupId = supabaseData.getStrategiesByGroupId;
+  const getStopsByGroupId = supabaseData.getStopsByGroupId;
+  const getStopsByStrategyId = supabaseData.getStopsByStrategyId;
+  const filterGroups = supabaseData.filterGroups;
 
-  const getGroupById = (id: string) => 
-    dataStore.groups.find(group => group.id === id);
+  // CRUD Operations - usar funções do Supabase
+  const addGroup = supabaseData.addGroup;
+  const addStrategy = supabaseData.addStrategy;
+  const addStop = supabaseData.addStop;
 
-  const getStrategiesByGroupId = (groupId: string) => 
-    dataStore.strategies.filter(strategy => strategy.groupId === groupId);
+  // Funções de atualização (manter compatibilidade)
+  const updateGroup = useCallback(async (groupId: string, updatedGroup: Partial<AssetGroup>) => {
+    const updates = {
+      name: updatedGroup.name,
+      type: updatedGroup.type,
+      location_center_id: updatedGroup.locationCenter || null,
+      phase: updatedGroup.phase,
+      system: updatedGroup.system,
+      category: updatedGroup.category,
+      executive_directorate: updatedGroup.executiveDirectorate,
+      executive_management: updatedGroup.executiveManagement
+    };
+    
+    await supabaseData.updateAssetGroup(groupId, updates);
+  }, [supabaseData]);
 
-  const getStopsByGroupId = (groupId: string) => 
-    dataStore.stops.filter(stop => stop.groupId === groupId);
+  const updateStrategy = useCallback(async (strategyId: string, updatedStrategy: Partial<MaintenanceStrategy>) => {
+    const updates = {
+      name: updatedStrategy.name,
+      frequency_value: updatedStrategy.frequency?.value,
+      frequency_unit: updatedStrategy.frequency?.unit,
+      duration_value: updatedStrategy.duration?.value,
+      duration_unit: updatedStrategy.duration?.unit,
+      start_date: updatedStrategy.startDate?.toISOString(),
+      end_date: updatedStrategy.endDate?.toISOString() || null,
+      is_active: updatedStrategy.isActive,
+      description: updatedStrategy.description || null,
+      priority: updatedStrategy.priority,
+      teams: updatedStrategy.teams || null,
+      total_hours: updatedStrategy.totalHours || null,
+      completion_percentage: updatedStrategy.completionPercentage || 0
+    };
+    
+    await supabaseData.updateMaintenanceStrategy(strategyId, updates);
+  }, [supabaseData]);
 
-  const getStopsByStrategyId = (strategyId: string) => 
-    dataStore.stops.filter(stop => stop.strategyId === strategyId);
-
-  // Filtros
-  const filterGroups = useCallback((searchTerm: string, phase: string, center: string) => {
-    return dataStore.groups.filter(group => {
-      const matchesSearch = group.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                           group.locationCenterName.toLowerCase().includes(searchTerm.toLowerCase());
-      const matchesPhase = !phase || group.phase === phase;
-      const matchesCenter = !center || group.locationCenter === center;
-      
-      return matchesSearch && matchesPhase && matchesCenter;
-    });
-  }, [dataStore.groups]);
-
-  // CRUD Operations
-  const addGroup = useCallback((group: AssetGroup) => {
-    setDataStore(prev => ({
-      ...prev,
-      groups: [...prev.groups, group]
-    }));
-  }, []);
-
-  const updateGroup = useCallback((groupId: string, updatedGroup: Partial<AssetGroup>) => {
-    setDataStore(prev => ({
-      ...prev,
-      groups: prev.groups.map(group => 
-        group.id === groupId ? { ...group, ...updatedGroup } : group
-      )
-    }));
-  }, []);
-
-  const addStrategy = useCallback((strategy: MaintenanceStrategy) => {
-    setDataStore(prev => {
-      const newStrategies = [...prev.strategies, strategy];
-      const updatedGroups = prev.groups.map(group => 
-        group.id === strategy.groupId 
-          ? { ...group, strategies: [...group.strategies, strategy] }
-          : group
-      );
-      
-      return {
-        ...prev,
-        strategies: newStrategies,
-        groups: updatedGroups
-      };
-    });
-  }, []);
-
-  const updateStrategy = useCallback((strategyId: string, updatedStrategy: Partial<MaintenanceStrategy>) => {
-    setDataStore(prev => {
-      const newStrategies = prev.strategies.map(strategy => 
-        strategy.id === strategyId ? { ...strategy, ...updatedStrategy } : strategy
-      );
-      
-      const updatedGroups = prev.groups.map(group => ({
-        ...group,
-        strategies: group.strategies.map(strategy => 
-          strategy.id === strategyId ? { ...strategy, ...updatedStrategy } : strategy
-        )
-      }));
-      
-      return {
-        ...prev,
-        strategies: newStrategies,
-        groups: updatedGroups
-      };
-    });
-  }, []);
-
-  const addStop = useCallback((stop: MaintenanceStop) => {
-    setDataStore(prev => ({
-      ...prev,
-      stops: [...prev.stops, stop]
-    }));
-  }, []);
-
-  const updateStop = useCallback((stopId: string, updatedStop: Partial<MaintenanceStop>) => {
-    setDataStore(prev => ({
-      ...prev,
-      stops: prev.stops.map(stop => 
-        stop.id === stopId ? { ...stop, ...updatedStop } : stop
-      )
-    }));
-  }, []);
+  const updateStop = useCallback(async (stopId: string, updatedStop: Partial<MaintenanceStop>) => {
+    const updates = {
+      title: updatedStop.title,
+      description: updatedStop.description || null,
+      start_date: updatedStop.startDate?.toISOString(),
+      end_date: updatedStop.endDate?.toISOString(),
+      planned_start_date: updatedStop.plannedStartDate?.toISOString(),
+      planned_end_date: updatedStop.plannedEndDate?.toISOString(),
+      actual_start_date: updatedStop.actualStartDate?.toISOString() || null,
+      actual_end_date: updatedStop.actualEndDate?.toISOString() || null,
+      duration: updatedStop.duration,
+      status: updatedStop.status,
+      priority: updatedStop.priority,
+      affected_assets: updatedStop.affectedAssets,
+      responsible_team: updatedStop.responsibleTeam,
+      estimated_cost: updatedStop.estimatedCost || null,
+      actual_cost: updatedStop.actualCost || null
+    };
+    
+    await supabaseData.updateMaintenanceStop(stopId, updates);
+  }, [supabaseData]);
 
   // SAP BTP Integration Methods
   const syncWithSAP = useCallback(async () => {
